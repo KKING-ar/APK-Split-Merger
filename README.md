@@ -5,7 +5,9 @@ or a whole `.apks` / `.xapk` / `.apkm` bundle) into **one regular, installable
 APK file**.
 
 No install, no command line, no Python packages to set up — just add your
-files, pick a save folder, click **Merge**.
+files, pick a save folder, click **Merge**. If your bundle also has OBB
+expansion files, they're pulled out and clearly labeled for you too —
+see [About OBB files](#-about-obb-files).
 
 ![status](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue)
 ![python](https://img.shields.io/badge/python-3.8%2B-blue)
@@ -57,7 +59,7 @@ built-in libraries).
 1. Make sure you have **Python 3.8+** installed
    ([python.org/downloads](https://www.python.org/downloads/) — on
    Windows, tick **"Add python.exe to PATH"** during install).
-2. Download this repo's files (click **Code → Download ZIP**, or grab
+2. Download this repo's files (or click **Code → Download ZIP**, or grab
    the zip from [Releases](../../releases)) and unzip them into one folder.
 3. Launch the app:
    ```
@@ -89,6 +91,10 @@ built-in libraries).
    original app's name), so you don't need to type anything.
 5. Click **Merge**. Progress and any messages appear in the **Log** box at
    the bottom.
+   - If your `.xapk`/`.apks` bundle also contains **OBB expansion files**
+     (extra game/app data stored outside the APK), you'll get a heads-up
+     before the merge starts — see [About OBB files](#-about-obb-files)
+     below.
 6. When it finishes, you'll see a confirmation with the saved file's
    location.
 
@@ -111,6 +117,35 @@ like **APK Editor Studio** can do it too.
 > Note: a debug-signed APK is fine for personal installs and testing, but
 > it is **not** meant for distributing an app to other people through an
 > app store — for that you'd want your own release keystore.
+
+---
+
+## 📦 About OBB files
+
+Some `.xapk` / `.apks` bundles (mostly games) carry **OBB expansion
+files** alongside the split APKs — these are large asset/data files
+(`main.*.obb`, `patch.*.obb`) that Android stores separately from the
+APK, normally under `Android/obb/<package name>/` on the device. They're
+**not part of the APK** and can't be merged into it — that's just how
+Android handles them.
+
+If the archive you add contains any, this app:
+
+1. **Flags it up front** — an orange notice appears under the file list
+   as soon as you pick the archive, telling you how many OBB files were
+   found.
+2. **Warns you again right before merging** — a confirmation dialog
+   explains that the merge will proceed as normal and the OBB files will
+   be pulled out separately, so nothing gets lost or silently dropped.
+3. **Extracts them automatically** during the merge, into a
+   `<merged apk name>_OBB` folder saved next to the merged APK, keeping
+   the `<package name>/main.*.obb` structure intact.
+
+Once merging is done, **copy that folder's contents onto the device's
+`Android/obb/` folder** (so you end up with
+`Android/obb/<package name>/main.*.obb`, etc.) alongside installing the
+merged APK. Without this step, the app will install fine but may fail to
+load its assets or prompt to "download additional data" on first launch.
 
 ---
 
@@ -138,6 +173,10 @@ like **APK Editor Studio** can do it too.
   manually with your own keystore to compare (see [About signing](#️-about-signing) above).
 - **"App not installed" error even after signing** — double check the
   *Strip split metadata* option was enabled during the merge.
+- **App installs but assets are missing / it asks to "download additional
+  data"** — check whether a `<name>_OBB` folder was created next to your
+  merged APK (see [About OBB files](#-about-obb-files) above), and copy
+  its contents into `Android/obb/<package name>/` on the device.
 
 ---
 
