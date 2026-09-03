@@ -54,6 +54,41 @@ ADOPTIUM_URL = "https://adoptium.net/"
 SPLIT_ARCHIVE_EXTS = (".apks", ".xapk", ".apkm")
 
 
+def find_obb_entries(archive_path):
+    """Look inside a split archive (.xapk/.apks/.apkm) for OBB expansion
+    files (game/data assets that live alongside the APK on a device, not
+    inside it). xapk files normally store these under
+    Android/obb/<package>/*.obb - be a little permissive and catch any
+    *.obb entry even if the archive doesn't use that exact layout.
+
+    Returns a list of (zip_entry_name, relative_path_on_disk) tuples.
+    relative_path_on_disk is the entry's path with any leading
+    "Android/obb/" stripped off, so re-creating it under a destination
+    folder reproduces the "<package>/main.*.obb" layout the device
+    expects under its own Android/obb/ folder.
+    """
+    found = []
+    try:
+        with zipfile.ZipFile(archive_path) as zf:
+            for info in zf.infolist():
+                name = info.filename
+                if name.endswith("/"):
+                    continue
+                norm = name.replace("\\", "/")
+                if not norm.lower().endswith(".obb"):
+                    continue
+                lower = norm.lower()
+                idx = lower.find("android/obb/")
+                if idx != -1:
+                    rel = norm[idx + len("android/obb/"):]
+                else:
+                    rel = os.path.basename(norm)
+                found.append((name, rel))
+    except (zipfile.BadZipFile, FileNotFoundError, OSError):
+        pass
+    return found
+
+
 def load_config():
     if os.path.isfile(CONFIG_FILE):
         try:
@@ -138,6 +173,8 @@ class MergerGUI(tk.Tk):
         self.java_path = tk.StringVar(value=self.cfg.get("java_path") or find_java() or "")
         self.signer_jar_path = tk.StringVar(value=self.cfg.get("signer_jar_path") or guess_signer_jar() or "")
         self.auto_sign = tk.BooleanVar(value=self.cfg.get("auto_sign", True))
+        self.detected_obb = []  # (zip_entry_name, relative_path) found in the current archive
+        self.obb_notice_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Ready.")
         self.log_queue = queue.Queue()
         self.worker = None
@@ -196,6 +233,12 @@ class MergerGUI(tk.Tk):
         ttk.Button(btns, text="Remove selected", command=self._remove_selected).pack(side="left", padx=4)
         ttk.Button(btns, text="Clear", command=self._clear_all).pack(side="left", padx=4)
 
+        self.obb_notice_label = ttk.Label(
+            inp, textvariable=self.obb_notice_var, foreground="#b35900",
+            anchor="w", justify="left", wraplength=700,
+        )
+        self.obb_notice_label.pack(fill="x", padx=6, pady=(0, 6))
+
         # --- Output ----------------------------------------------------------
         out = ttk.LabelFrame(self, text="Output folder  (file name is taken from the input automatically)")
         out.pack(fill="x", **pad)
@@ -248,6 +291,7 @@ class MergerGUI(tk.Tk):
             if p not in self.input_items:
                 self.input_items.append(p)
                 self.listbox.insert(tk.END, p)
+        self._set_detected_obb([])
         self._refresh_output_path()
 
     def _add_folder(self):
@@ -260,6 +304,7 @@ class MergerGUI(tk.Tk):
                 if p not in self.input_items:
                     self.input_items.append(p)
                     self.listbox.insert(tk.END, p)
+        self._set_detected_obb([])
         self._refresh_output_path()
 
     def _add_archive(self):
@@ -271,18 +316,36 @@ class MergerGUI(tk.Tk):
             self.input_items = [p]  # an archive is used on its own
             self.listbox.delete(0, tk.END)
             self.listbox.insert(tk.END, p)
+            # .xapk/.apks bundles sometimes carry OBB expansion files
+            # alongside the split APKs - those don't merge into the APK,
+            # so flag them up front.
+            self._set_detected_obb(find_obb_entries(p))
         self._refresh_output_path()
 
     def _remove_selected(self):
         for i in reversed(self.listbox.curselection()):
             del self.input_items[i]
             self.listbox.delete(i)
+        self._set_detected_obb([])
         self._refresh_output_path()
 
     def _clear_all(self):
         self.input_items = []
         self.listbox.delete(0, tk.END)
+        self._set_detected_obb([])
         self._refresh_output_path()
+
+    def _set_detected_obb(self, entries):
+        self.detected_obb = entries
+        if entries:
+            self.obb_notice_var.set(
+                "⚠ This archive also contains {n} OBB expansion file(s) (game/app data "
+                "stored outside the APK). They can't be merged in - they'll be "
+                "extracted into a folder next to the merged APK. Copy that folder's "
+                "contents to Android/obb/ on the device afterwards.".format(n=len(entries))
+            )
+        else:
+            self.obb_notice_var.set("")
 
     def _choose_output_dir(self):
         d = filedialog.askdirectory(title="Choose where to save the merged APK")
@@ -392,6 +455,21 @@ class MergerGUI(tk.Tk):
         if not self._validate_before_run():
             return
 
+        if self.detected_obb:
+            proceed = messagebox.askokcancel(
+                APP_TITLE,
+                "Heads up: this archive contains {n} OBB expansion file(s) - "
+                "extra game/app data that Android stores outside the APK "
+                "(under Android/obb/<package>/ on the device).\n\n"
+                "These files can't be merged into the APK. The merge will "
+                "still go ahead, and this tool will additionally extract "
+                "those OBB file(s) into a folder next to the merged APK, "
+                "with a note on where to copy them on the device.\n\n"
+                "Continue?".format(n=len(self.detected_obb)),
+            )
+            if not proceed:
+                return
+
         # Persist choices for next launch.
         self.cfg["jar_path"] = self.jar_path.get().strip()
         self.cfg["java_path"] = self.java_path.get().strip()
@@ -448,6 +526,26 @@ class MergerGUI(tk.Tk):
             if os.path.exists(out_path):
                 os.remove(out_path)
 
+            obb_dest_dir = None
+            extracted_obb = []
+            if is_archive and self.detected_obb:
+                self._log("Extracting OBB files (these won't be merged into the APK)…")
+                base_name = os.path.splitext(os.path.basename(out_path))[0]
+                obb_dest_dir = os.path.join(out_dir or ".", base_name + "_OBB")
+                try:
+                    extracted_obb = self._extract_obb_files(single, obb_dest_dir)
+                    if extracted_obb:
+                        self._log("Extracted {n} OBB file(s) to: {d}".format(
+                            n=len(extracted_obb), d=obb_dest_dir))
+                        self._log("Copy that folder's contents to Android/obb/ on the "
+                                   "device (e.g. Android/obb/<package>/main.*.obb).")
+                    else:
+                        self._log("No OBB files could be extracted.")
+                        obb_dest_dir = None
+                except Exception as e:
+                    self._log("OBB extraction failed: " + str(e))
+                    obb_dest_dir = None
+
             cmd = [
                 self.java_path.get().strip(),
                 "-jar",
@@ -484,6 +582,15 @@ class MergerGUI(tk.Tk):
                 if self.auto_sign.get():
                     signed_ok = self._sign_apk(out_path)
 
+                obb_note = ""
+                if obb_dest_dir and extracted_obb:
+                    obb_note = (
+                        "\n\nAlso extracted {n} OBB file(s) to:\n{d}\n"
+                        "Copy that folder's contents to Android/obb/ on the device "
+                        "(so it ends up at Android/obb/<package>/...).".format(
+                            n=len(extracted_obb), d=obb_dest_dir)
+                    )
+
                 if self.auto_sign.get() and signed_ok:
                     self._log("Signed successfully - ready to install.")
                     self.status_var.set("Done (signed): " + out_path)
@@ -491,7 +598,7 @@ class MergerGUI(tk.Tk):
                         APP_TITLE,
                         "Merge complete and signed!\n\n" + out_path +
                         "\n\nThis APK is ready to install right away "
-                        "(signed with a debug certificate)."
+                        "(signed with a debug certificate)." + obb_note
                     ))
                 elif self.auto_sign.get() and not signed_ok:
                     self.status_var.set("Merged, but signing failed - see log.")
@@ -500,7 +607,7 @@ class MergerGUI(tk.Tk):
                         "The merge succeeded, but auto-signing failed - see the log.\n\n"
                         + out_path +
                         "\n\nThe file was saved unsigned; you'll need to sign it manually "
-                        "before it will install."
+                        "before it will install." + obb_note
                     ))
                 else:
                     self.status_var.set("Done: " + out_path)
@@ -510,7 +617,7 @@ class MergerGUI(tk.Tk):
                         "\n\nNote: the app's signature was broken by the merge, "
                         "so you'll need to sign it (e.g. with apksigner and a "
                         "debug/release keystore) before it will install, or turn on "
-                        "'Auto-sign' next time."
+                        "'Auto-sign' next time." + obb_note
                     ))
             else:
                 self.status_var.set("Failed - see log.")
@@ -522,6 +629,26 @@ class MergerGUI(tk.Tk):
         finally:
             if tmp_input_dir and os.path.isdir(tmp_input_dir):
                 shutil.rmtree(tmp_input_dir, ignore_errors=True)
+
+    def _extract_obb_files(self, archive_path, dest_dir):
+        """Copy every OBB expansion file found inside archive_path out to
+        dest_dir, preserving the <package>/main.*.obb layout so dest_dir's
+        contents can be dropped straight into Android/obb/ on a device.
+        Returns the list of extracted file paths."""
+        entries = find_obb_entries(archive_path)
+        extracted = []
+        if not entries:
+            return extracted
+        os.makedirs(dest_dir, exist_ok=True)
+        with zipfile.ZipFile(archive_path) as zf:
+            for zip_name, rel_path in entries:
+                rel_path = rel_path.replace("/", os.sep).replace("\\", os.sep)
+                dest_path = os.path.join(dest_dir, rel_path)
+                os.makedirs(os.path.dirname(dest_path) or dest_dir, exist_ok=True)
+                with zf.open(zip_name) as src, open(dest_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                extracted.append(dest_path)
+        return extracted
 
     def _sign_apk(self, apk_path):
         """Sign apk_path in place using uber-apk-signer.jar (debug keystore
